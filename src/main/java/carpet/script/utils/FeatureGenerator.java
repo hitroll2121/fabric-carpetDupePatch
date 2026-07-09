@@ -11,9 +11,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 import com.mojang.datafixers.util.Pair;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
 import net.minecraft.core.HolderGetter;
 import net.minecraft.core.HolderSet;
@@ -22,13 +24,19 @@ import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.data.worldgen.Pools;
 import net.minecraft.data.worldgen.ProcessorLists;
+import net.minecraft.data.worldgen.features.AquaticFeatures;
 import net.minecraft.data.worldgen.placement.PlacementUtils;
+import net.minecraft.references.BlockItemIds;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BiomeTags;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.util.RandomSource;
+import net.minecraft.util.random.Weighted;
+import net.minecraft.util.random.WeightedList;
 import net.minecraft.util.valueproviders.ConstantInt;
+import net.minecraft.util.valueproviders.UniformInt;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Block;
@@ -38,18 +46,28 @@ import net.minecraft.world.level.chunk.ChunkGeneratorStructureState;
 import net.minecraft.world.level.levelgen.GenerationStep;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.VerticalAnchor;
+import net.minecraft.world.level.levelgen.blockpredicates.BlockPredicate;
 import net.minecraft.world.level.levelgen.feature.CoralClawFeature;
-import net.minecraft.world.level.levelgen.feature.CoralMushroomFeature;
 import net.minecraft.world.level.levelgen.feature.CoralTreeFeature;
+import net.minecraft.world.level.levelgen.feature.CuboidPlacement;
 import net.minecraft.world.level.levelgen.feature.Feature;
+import net.minecraft.world.level.levelgen.feature.NoOpFeature;
+import net.minecraft.world.level.levelgen.feature.OverlayFeature;
+import net.minecraft.world.level.levelgen.feature.SimpleBlockFeature;
 import net.minecraft.world.level.levelgen.feature.SimpleRandomSelectorFeature;
 import net.minecraft.world.level.levelgen.feature.TreeFeature;
+import net.minecraft.world.level.levelgen.feature.WeightedRandomSelectorFeature;
 import net.minecraft.world.level.levelgen.feature.featuresize.TwoLayersFeatureSize;
 import net.minecraft.world.level.levelgen.feature.foliageplacers.BlobFoliagePlacer;
 import net.minecraft.world.level.levelgen.feature.foliageplacers.FancyFoliagePlacer;
 import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider;
+import net.minecraft.world.level.levelgen.feature.stateproviders.RandomBlockProvider;
+import net.minecraft.world.level.levelgen.feature.stateproviders.RotatedBlockProvider;
 import net.minecraft.world.level.levelgen.feature.stateproviders.RuleBasedStateProvider;
 import net.minecraft.world.level.levelgen.heightproviders.ConstantHeight;
+import net.minecraft.world.level.levelgen.placement.BlockPredicateFilter;
+import net.minecraft.world.level.levelgen.placement.OffsetPlacement;
+import net.minecraft.world.level.levelgen.placement.RandomChancePlacement;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureType;
@@ -278,6 +296,78 @@ public class FeatureGenerator
         return new TreeFeature.Builder(BlockStateProvider.simple(block), new StraightTrunkPlacer(i, j, k), BlockStateProvider.simple(block2), new BlobFoliagePlacer(ConstantInt.of(l), ConstantInt.of(0), 3), new TwoLayersFeatureSize(1, 0, 1), belowTrees);
     }
 
+    // from AquaticFeatures
+    private static Holder<PlacedFeature> wallCoral(final HolderGetter<Block> blocks, final Direction direction) {
+        return PlacementUtils.inlinePlaced(
+                new SimpleBlockFeature(new RotatedBlockProvider(new RandomBlockProvider(blocks.getOrThrow(BlockTags.WALL_CORALS)), Optional.of(direction))),
+                new RandomChancePlacement(0.2f),
+                OffsetPlacement.of(direction),
+                BlockPredicateFilter.forPredicate(BlockPredicate.matchesBlocks(Blocks.WATER))
+        );
+    }
+
+    public static Feature coral(final HolderGetter<Feature> features, final HolderGetter<Block> blocks, final Block block) {
+        return new OverlayFeature(HolderSet.direct(
+                PlacementUtils.inlinePlaced(new SimpleBlockFeature(BlockStateProvider.simple(block))),
+                PlacementUtils.inlinePlaced(
+                        new WeightedRandomSelectorFeature(WeightedList.of(
+                                new Weighted<>(PlacementUtils.inlinePlaced(new SimpleBlockFeature(new RandomBlockProvider(blocks.getOrThrow(BlockTags.CORALS)))), 20),
+                                new Weighted<>(PlacementUtils.inlinePlaced(features.getOrThrow(AquaticFeatures.SEA_PICKLE)), 3),
+                                new Weighted<>(PlacementUtils.inlinePlaced(new NoOpFeature()), 57)
+                        )),
+                        OffsetPlacement.above()
+                ),
+                wallCoral(blocks, Direction.NORTH),
+                wallCoral(blocks, Direction.EAST),
+                wallCoral(blocks, Direction.SOUTH),
+                wallCoral(blocks, Direction.WEST)
+        ));
+    }
+
+    final static public BlockPredicateFilter coralPlacement = BlockPredicateFilter.forPredicate(BlockPredicate.allOf(
+            BlockPredicate.anyOf(BlockPredicate.matchesBlocks(Blocks.WATER), BlockPredicate.matchesTag(BlockTags.CORALS)),
+            BlockPredicate.matchesBlocks(Direction.UP, Blocks.WATER)
+    ));
+
+
+    private static Feature coral(ServerLevel level, final int type) {
+        var blocks = level.registryAccess().lookupOrThrow(Registries.BLOCK);
+        var features = level.registryAccess().lookupOrThrow(Registries.FEATURE);
+
+        return new SimpleRandomSelectorFeature(
+                HolderSet.direct(
+                        Stream.of(BlockItemIds.TUBE_CORAL_BLOCK, BlockItemIds.BRAIN_CORAL_BLOCK, BlockItemIds.BUBBLE_CORAL_BLOCK, BlockItemIds.FIRE_CORAL_BLOCK, BlockItemIds.HORN_CORAL_BLOCK)
+                                .map(id -> blocks.getOrThrow(id.block()).value())
+                                .map(block -> coral(features, blocks, block))
+                                .map(
+                                        coralType -> switch (type) {
+                                            case 0 -> PlacementUtils.inlinePlaced(new CoralTreeFeature(
+                                                    PlacementUtils.inlinePlaced(coralType, coralPlacement))
+                                            );
+                                            case 1 -> PlacementUtils.inlinePlaced(new CoralClawFeature(
+                                                    PlacementUtils.inlinePlaced(coralType, coralPlacement))
+                                            );
+                                                default -> PlacementUtils.inlinePlaced(
+                                                        coralType,
+                                                        OffsetPlacement.vertical(UniformInt.of(-3, -1)),
+                                                        new CuboidPlacement(
+                                                                UniformInt.of(3, 5),
+                                                                UniformInt.of(3, 5),
+                                                                false,
+                                                                false
+                                                        ),
+                                                        new RandomChancePlacement(0.9f),
+                                                        coralPlacement
+                                                );
+                                        }
+                                        )
+                                .toList()
+                )
+        );
+    }
+
+
+
     public static final Map<String, Function<ServerLevel, Thing>> featureMap = new HashMap<>()
     {{
 
@@ -286,17 +376,13 @@ public class FeatureGenerator
         put("fancy_oak_bees", l -> simpleTree(new TreeFeature.Builder(BlockStateProvider.simple(Blocks.OAK_LOG), new FancyTrunkPlacer(3, 11, 0), BlockStateProvider.simple(Blocks.OAK_LEAVES), new FancyFoliagePlacer(ConstantInt.of(2), ConstantInt.of(4), 4), new TwoLayersFeatureSize(0, 0, 0, OptionalInt.of(4)), belowTrees).ignoreVines().decorators(List.of(new BeehiveDecorator(1.00F)))));
         put("birch_bees", l -> simpleTree(createTree(Blocks.BIRCH_LOG, Blocks.BIRCH_LEAVES, 5, 2, 0, 2).ignoreVines().decorators(List.of(new BeehiveDecorator(1.00F)))));
 
-        put("coral_tree", l -> simplePlop(new CoralTreeFeature()));
+        put("coral_tree", l -> simplePlop(coral(l, 0)));
 
-        put("coral_claw", l -> simplePlop(new CoralClawFeature()));
-        put("coral_mushroom", l -> simplePlop(new CoralMushroomFeature()));
-        put("coral", l -> simplePlop(new SimpleRandomSelectorFeature(
-                HolderSet.direct(
-                        PlacementUtils.inlinePlaced(new CoralTreeFeature()),
-                        PlacementUtils.inlinePlaced(new CoralClawFeature()),
-                        PlacementUtils.inlinePlaced(new CoralMushroomFeature())
-                )
-        )));
+        put("coral_claw", l -> simplePlop(coral(l, 1)));
+        put("coral_mushroom", l -> simplePlop(coral(l , 2)));
+
+        put("coral", l -> simplePlop( l.registryAccess().lookupOrThrow(Registries.FEATURE).getOrThrow(AquaticFeatures.WARM_OCEAN_VEGETATION).value()));
+
         put("bastion_remnant_units", l -> {
             RegistryAccess regs = l.registryAccess();
 
